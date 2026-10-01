@@ -3,7 +3,7 @@ import { Key, isKeyRelease, matchesKey, type AutocompleteItem, type Component, t
 import { completePath, resolvePath } from "./paths.ts";
 import { safeText } from "./documents.ts";
 import { PreviewViewer } from "./viewer.ts";
-import { QuickOpen } from "./quick-open.ts";
+import { QuickOpen, type QuickOpenState } from "./quick-open.ts";
 import { recentFiles } from "./recents.ts";
 import { stopImageWorker } from "./image-client.ts";
 import { isOmpHost } from "./host.ts";
@@ -62,14 +62,17 @@ export default function piView(pi: ExtensionAPI): void {
     try { pi.appendEntry("pi-view-open", { path }); } catch {}
   };
 
-  async function showPreview(ctx: ExtensionContext, path: string, initial?: "help" | "diagnostics"): Promise<void> {
+  async function showPreview(ctx: ExtensionContext, path: string, initial?: "help" | "diagnostics", fromPicker = false): Promise<boolean> {
     if (closePreview && !closePreview()) {
       ctx.ui.notify("Neovim session active — finish with :q or :wq (or :q! to discard), then try again", "warning");
-      return;
+      return false;
     }
     let viewer: PreviewViewer | undefined;
     let handle: OverlayHandle | undefined;
     let localClose: ((force?: boolean) => boolean) | undefined;
+    // Esc in a preview opened from Quick Open reports back so the caller can
+    // reopen the picker; Ctrl+C and every other close path end the preview.
+    let returned = false;
     try {
       await ctx.ui.custom<void>((tui, theme, _keys, done) => {
         let ended = false;
@@ -81,7 +84,10 @@ export default function piView(pi: ExtensionAPI): void {
           closeOwned(tui, handle, done);
           return true;
         };
-        viewer = new PreviewViewer(tui, theme, localClose, path, initial, recordOpen);
+        viewer = new PreviewViewer(tui, theme, reason => {
+          if (reason === "escape" && fromPicker) returned = true;
+          localClose?.(false);
+        }, path, initial, recordOpen, fromPicker);
         closePreview = localClose;
         activeViewer = viewer;
         return viewer;
@@ -95,15 +101,20 @@ export default function piView(pi: ExtensionAPI): void {
       if (closePreview === localClose) closePreview = undefined;
       if (activeViewer === viewer) activeViewer = undefined;
     }
+    return returned;
   }
 
-  async function showQuick(ctx: ExtensionContext): Promise<void> {
-    if (quickPending || !ctx.hasUI) return;
+  /**
+   * One Quick Open mount. Resolves with the chosen file and the query that was
+   * in the box, so returning from a preview can rebuild the same list state.
+   */
+  async function pickFile(ctx: ExtensionContext, restore?: QuickOpenState): Promise<QuickOpenState | undefined> {
+    if (quickPending || !ctx.hasUI) return undefined;
     quickPending = true;
-    const requested = lifetime;
     let quick: QuickOpen | undefined;
     let handle: OverlayHandle | undefined;
     let picked: string | undefined;
+    let query = "";
     try {
       picked = await ctx.ui.custom<string | undefined>((tui, theme, _keys, done) => {
         let ended = false;
@@ -113,7 +124,7 @@ export default function piView(pi: ExtensionAPI): void {
           closeOwned(tui, handle, () => done(path));
         };
         closeQuick = () => finish();
-        quick = new QuickOpen(tui, theme, ctx.cwd, recentFiles(ctx.sessionManager.getBranch(), ctx.cwd), finish);
+        quick = new QuickOpen(tui, theme, ctx.cwd, recentFiles(ctx.sessionManager.getBranch(), ctx.cwd), finish, restore);
         return quick;
       }, {
         overlay: true,
@@ -123,9 +134,25 @@ export default function piView(pi: ExtensionAPI): void {
         overlayOptions: { ...(closePreview ? fullscreen : {}), width: "80%", maxHeight: "90%", anchor: "top-center", row: closePreview ? 3 : 2 },
         onHandle: received => { handle = received; },
       });
-    } finally { quick?.dispose(); closeQuick = undefined; quickPending = false; }
-    if (picked && lifetime !== requested) picked = undefined;
-    if (picked) await showPreview(ctx, picked);
+    } finally {
+      query = quick?.query ?? "";
+      quick?.dispose(); closeQuick = undefined; quickPending = false;
+    }
+    return picked ? { query, path: picked } : undefined;
+  }
+
+  async function showQuick(ctx: ExtensionContext): Promise<void> {
+    let state: QuickOpenState | undefined;
+    for (;;) {
+      const started = lifetime;
+      const chosen = await pickFile(ctx, state);
+      // A pick spanning a session boundary is dropped instead of leaking UI.
+      if (!chosen || lifetime !== started) return;
+      // Esc over a preview from this picker comes back here with the same query
+      // and file selected; Ctrl+C, or a preview closed another way, ends it.
+      if (!await showPreview(ctx, chosen.path, undefined, true) || lifetime !== started) return;
+      state = chosen;
+    }
   }
 
   pi.on("session_start", (_event, ctx) => {

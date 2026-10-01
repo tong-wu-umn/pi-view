@@ -150,3 +150,44 @@ test("Entering a quoted flag-like directory keeps subsequent completion inside i
   await selected(result);
   assert.deepEqual(result, [join(dir, "-folder", "child.txt")]);
 });
+
+test("Restoring a picker keeps the query and selects the file it came back from", async t => {
+  const dir = await mkdtemp(join(tmpdir(), "pi-view-quick-restore-"));
+  const alpha = join(dir, "alpha.txt"); const beta = join(dir, "beta.txt");
+  await writeFile(alpha, "a"); await writeFile(beta, "b");
+  const tui = { terminal: { rows: 24, columns: 80, write() {} }, requestRender() {}, addInputListener: () => () => {} } as unknown as TUI;
+  t.after(async () => { await rm(dir, { recursive: true, force: true }); });
+  // A typed query normally leaves nothing selected, so Enter would open the
+  // literal text; the restore path must win and reopen the same file.
+  const typed: (string | undefined)[] = [];
+  const afterQuery = new QuickOpen(tui, theme, dir, Promise.resolve([beta, alpha]), path => typed.push(path), { query: "al", path: alpha });
+  t.after(() => afterQuery.dispose());
+  assert.equal(afterQuery.query, "al");
+  afterQuery.handleInput("\r");
+  await selected(typed);
+  assert.deepEqual(typed, [alpha]);
+  // An empty query restores from recents, highlighting the returned file
+  // instead of defaulting to the newest entry.
+  const recents: (string | undefined)[] = [];
+  const afterRecent = new QuickOpen(tui, theme, dir, Promise.resolve([beta, alpha]), path => recents.push(path), { query: "", path: alpha });
+  t.after(() => afterRecent.dispose());
+  await delay(0);
+  afterRecent.handleInput("\r");
+  await selected(recents);
+  assert.deepEqual(recents, [alpha]);
+});
+
+test("A restore path that is gone falls back to ordinary picker behaviour", async t => {
+  const { dir, quick, result } = await fixture(t, ["kept.txt"]);
+  const missing = join(dir, "deleted.txt");
+  const restored = new QuickOpen(
+    { terminal: { rows: 24, columns: 80, write() {} }, requestRender() {}, addInputListener: () => () => {} } as unknown as TUI,
+    theme, dir, Promise.resolve([join(dir, "kept.txt")]), path => result.push(path), { query: "", path: missing });
+  t.after(() => restored.dispose());
+  await delay(0);
+  // No match for the missing file: Enter opens the newest recent instead.
+  restored.handleInput("\r");
+  await selected(result);
+  assert.deepEqual(result, [join(dir, "kept.txt")]);
+  assert.equal(quick.query, "");
+});

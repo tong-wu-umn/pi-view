@@ -287,11 +287,57 @@ test("Replacing a background preview beneath a foreign overlay leaves the foreig
   });
   app.send("\r");
   await until(() => app.focused() instanceof PreviewViewer);
+  // Esc comes back to the picker that opened it, above the foreign overlay;
+  // a second Esc closes the picker and restores the foreign overlay.
+  app.send("\x1b");
+  await until(() => app.focused() instanceof QuickOpen);
+  assert.ok(app.hasOverlay());
   app.send("\x1b");
   await until(() => app.focused() === foreign);
   app.send("x");
   await until(() => foreign.received.includes("x"));
   await background;
+});
+
+test("Esc over a preview opened from Quick Open returns to the picker with its query and selection", async t => {
+  const app = await host(t);
+  const path = join(app.cwd, "code.ts"); await writeFile(path, "const preview = true;");
+  app.send("\x1b[112;9u");
+  await until(() => app.focused() instanceof QuickOpen);
+  for (const character of "code") app.send(character);
+  await until(() => (app.focused() as QuickOpen).render(80).some(line => line.includes("code.ts")));
+  app.send("\x1b[B");
+  app.send("\r");
+  await until(() => app.focused() instanceof PreviewViewer && app.entries.length === 1);
+  assert.deepEqual(app.entries, [{ type: "custom", customType: "pi-view-open", data: { path } }]);
+  // The preview advertises the return instead of a plain close.
+  assert.ok((app.focused() as PreviewViewer).render(200).join("\n").includes("Esc: back"));
+  app.send("\x1b");
+  await until(() => app.focused() instanceof QuickOpen);
+  const reopened = app.focused() as QuickOpen;
+  assert.equal(reopened.query, "code");
+  // The file the user came back from stays selected, so Enter reopens it.
+  app.send("\r");
+  await until(() => app.focused() instanceof PreviewViewer);
+  await until(() => app.entries.length === 2);
+  assert.deepEqual(app.entries[1], { type: "custom", customType: "pi-view-open", data: { path } });
+  // Ctrl+C closes the preview and the picker at once: no picker comes back.
+  app.send("\x03");
+  await until(() => !app.hasOverlay());
+  await delay(30);
+  assert.equal(app.focused(), null);
+});
+
+test("Esc over /view previews still closes to the session instead of reopening the picker", async t => {
+  const app = await host(t);
+  const path = join(app.cwd, "code.ts"); await writeFile(path, "const preview = true;");
+  const pending = app.commands.get("view")!.handler(path, app.context);
+  await until(() => app.focused() instanceof PreviewViewer);
+  assert.ok((app.focused() as PreviewViewer).render(200).join("\n").includes("Esc: close"));
+  app.send("\x1b");
+  await until(() => !app.hasOverlay());
+  await pending;
+  assert.equal(app.focused(), null);
 });
 
 test("Recents record regular-file opens through the viewer callback, not directory listings or failures", async t => {

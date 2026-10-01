@@ -9,6 +9,9 @@ import { attachMouse } from "./host.ts";
 
 interface Candidate { path: string; value: string; directory: boolean }
 
+/** Picker state carried across a preview: the typed query and the chosen file. */
+export interface QuickOpenState { query: string; path: string }
+
 export class QuickOpen implements Component {
   private input = new Input();
   private recent: string[] = [];
@@ -20,9 +23,14 @@ export class QuickOpen implements Component {
   private version = 0;
   private _focused = false;
   private detachMouse?: () => void;
+  /** Path to highlight once it appears in the candidate list (consumed once). */
+  private restorePath?: string;
 
   constructor(private tui: TUI, private theme: Theme, private cwd: string,
-    recent: Promise<string[]>, private done: (path: string | undefined) => void) {
+    recent: Promise<string[]>, private done: (path: string | undefined) => void,
+    restore?: QuickOpenState) {
+    this.restorePath = restore?.path;
+    if (restore?.query) this.setValue(restore.query);
     this.input.onSubmit = () => { void this.choose(); };
     void recent.then(paths => {
       if (this.closed) return;
@@ -33,6 +41,9 @@ export class QuickOpen implements Component {
       this.loading = false; this.message = safeText((error as Error).message); this.refresh();
     });
   }
+
+  /** Current input text, so a host can restore it after a preview closes. */
+  get query(): string { return this.input.getValue(); }
 
   get focused(): boolean { return this._focused; }
   set focused(value: boolean) {
@@ -63,6 +74,10 @@ export class QuickOpen implements Component {
         catch { return []; }
       });
     this.selected = value.length ? -1 : (this.candidates.length ? 0 : -1);
+    // Reopened after a preview: keep the file the user came back from selected.
+    const restored = this.restorePath === undefined
+      ? -1 : this.candidates.findIndex(item => item.path === this.restorePath);
+    if (restored >= 0) { this.restorePath = undefined; this.selected = restored; }
     this.version++;
     if (!this.closed) this.tui.requestRender();
   }

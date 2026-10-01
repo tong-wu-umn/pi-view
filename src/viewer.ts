@@ -137,7 +137,12 @@ export class PreviewViewer implements Component {
   private editor?: NvimEditingSession;
   private _focused = false;
 
-  constructor(private tui: TUI, private theme: Theme, private done: () => void, path: string, initial?: "help" | "diagnostics", private onOpen?: (path: string) => void) {
+  constructor(private tui: TUI, private theme: Theme,
+    private done: (reason?: "escape" | "interrupt") => void, path: string,
+    initial?: "help" | "diagnostics", private onOpen?: (path: string) => void,
+    // True when the host opened this preview from Quick Open and Esc should
+    // hand control back to the picker instead of returning to the session.
+    private canReturn = false) {
     this.path = path;
     this.detachMouse = attachMouse(tui, delta => this.wheel(delta));
     this.input.onSubmit = value => this.submitInput(value);
@@ -156,6 +161,9 @@ export class PreviewViewer implements Component {
   // True while an embedded editor session is starting or running: it owns
   // every preview key, including the host's global shortcut.
   get editing(): boolean { return !!this.editor; }
+
+  /** Esc label: a preview reached from Quick Open goes back there. */
+  private get closeHint(): string { return this.canReturn ? "Esc: back" : "Esc: close"; }
 
   private redraw(clearLayout = false): void {
     if (clearLayout) { this.layout = undefined; this.matchRow = undefined; }
@@ -353,7 +361,12 @@ export class PreviewViewer implements Component {
     else if (key === "shift+=") data = "+";
     else if (key === "shift+/") data = "?";
     else if (key === "space") data = " ";
-    if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) { this.dispose(); this.done(); return; }
+    if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
+      // Esc only reports a reason; the host decides whether that means "back to
+      // Quick Open" or "restore the agent UI". Ctrl+C always means the latter.
+      const reason = matchesKey(data, "ctrl+c") ? "interrupt" : "escape";
+      this.dispose(); this.done(reason); return;
+    }
     if (this.remotePrompt) {
       this.remotePrompt = false;
       if (data.toLowerCase() === "y") {
@@ -363,7 +376,12 @@ export class PreviewViewer implements Component {
       return;
     }
     if (this.inputMode) { this.input.handleInput(raw); this.redraw(); return; }
-    if (data === "?") { this.panel = HELP; this.offset = 0; this.clearFrames(); this.redraw(true); return; }
+    if (data === "?") {
+      this.panel = this.canReturn
+        ? `${HELP}\nOpened from Quick Open: Esc returns to the file list; Ctrl+C closes it.`
+        : HELP;
+      this.offset = 0; this.clearFrames(); this.redraw(true); return;
+    }
     if (data === "d") { void this.showDiagnostics(); return; }
     if (data === "b") {
       this.panel = undefined; this.focusImage = undefined; this.offset = 0; this.resetZoom();
@@ -737,7 +755,7 @@ export class PreviewViewer implements Component {
 
   render(width: number): string[] {
     width = Math.max(1, width);
-    if (this.tui.terminal.rows < 6) return [truncateToWidth(this.editor ? "pi-view · enlarge terminal · Neovim active — finish with :q or :wq" : "pi-view · enlarge terminal · Esc: close", width)];
+    if (this.tui.terminal.rows < 6) return [truncateToWidth(this.editor ? "pi-view · enlarge terminal · Neovim active — finish with :q or :wq" : `pi-view · enlarge terminal · ${this.closeHint}`, width)];
     this.requestedImages.clear();
     this.width = Math.max(1, width);
     this.bodyHeight = Math.max(1, this.tui.terminal.rows - 5);
@@ -808,9 +826,9 @@ export class PreviewViewer implements Component {
     body.push(...Array(Math.max(0, this.bodyHeight - body.length)).fill(""));
     if (this.editor) return this.frame(title, body, this.message || ":w save · :wq/:q return · :q! discard · keys go to Neovim", width);
     let status = this.remotePrompt ? "Fetch remote Markdown images? Requests may reveal your IP. y: allow · any other key: deny"
-      : this.message || (this.imageMode() ? `+/-: zoom · arrows: pan${document?.kind === "pdf" ? " · wheel: pages" : ""} · 0: fit · 1: actual · b: back · Esc: close`
-      : this.picker && !this.panel ? "↑↓: choose · Enter: open · Backspace: parent · /: filter · Esc: close"
-      : `${this.editable() ? "e: edit · " : ""}↑↓ wheel: scroll · /: search · n/N: matches · s: source/text · i: image · ?: help · Esc: close`);
+      : this.message || (this.imageMode() ? `+/-: zoom · arrows: pan${document?.kind === "pdf" ? " · wheel: pages" : ""} · 0: fit · 1: actual · b: back · ${this.closeHint}`
+      : this.picker && !this.panel ? `↑↓: choose · Enter: open · Backspace: parent · /: filter · ${this.closeHint}`
+      : `${this.editable() ? "e: edit · " : ""}↑↓ wheel: scroll · /: search · n/N: matches · s: source/text · i: image · ?: help · ${this.closeHint}`);
     if (this.inputMode) status = `${this.inputMode}: ${this.input.render(Math.max(1, width - this.inputMode.length - 2))[0] ?? ""}`;
     return this.frame(title, body, status, width);
   }

@@ -4949,11 +4949,12 @@ Ghostty forwarding if needed: keybind = super+p=csi:112;9u
 PI_VIEW_IMAGES=off forces text/path fallbacks.
 Mouse support depends on the terminal; keyboard controls always work.`;
 var PreviewViewer = class {
-  constructor(tui, theme, done, path3, initial, onOpen) {
+  constructor(tui, theme, done, path3, initial, onOpen, canReturn = false) {
     this.tui = tui;
     this.theme = theme;
     this.done = done;
     this.onOpen = onOpen;
+    this.canReturn = canReturn;
     this.path = path3;
     this.detachMouse = attachMouse(tui, (delta) => this.wheel(delta));
     this.input.onSubmit = (value) => this.submitInput(value);
@@ -4965,6 +4966,7 @@ var PreviewViewer = class {
   theme;
   done;
   onOpen;
+  canReturn;
   document;
   abort = new AbortController();
   closed = false;
@@ -5027,6 +5029,10 @@ var PreviewViewer = class {
   // every preview key, including the host's global shortcut.
   get editing() {
     return !!this.editor;
+  }
+  /** Esc label: a preview reached from Quick Open goes back there. */
+  get closeHint() {
+    return this.canReturn ? "Esc: back" : "Esc: close";
   }
   redraw(clearLayout = false) {
     if (clearLayout) {
@@ -5268,8 +5274,9 @@ var PreviewViewer = class {
     else if (key === "shift+/") data = "?";
     else if (key === "space") data = " ";
     if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
+      const reason = matchesKey(data, "ctrl+c") ? "interrupt" : "escape";
       this.dispose();
-      this.done();
+      this.done(reason);
       return;
     }
     if (this.remotePrompt) {
@@ -5289,7 +5296,8 @@ var PreviewViewer = class {
       return;
     }
     if (data === "?") {
-      this.panel = HELP;
+      this.panel = this.canReturn ? `${HELP}
+Opened from Quick Open: Esc returns to the file list; Ctrl+C closes it.` : HELP;
       this.offset = 0;
       this.clearFrames();
       this.redraw(true);
@@ -5734,7 +5742,7 @@ var PreviewViewer = class {
   }
   render(width) {
     width = Math.max(1, width);
-    if (this.tui.terminal.rows < 6) return [truncateToWidth(this.editor ? "pi-view \xB7 enlarge terminal \xB7 Neovim active \u2014 finish with :q or :wq" : "pi-view \xB7 enlarge terminal \xB7 Esc: close", width)];
+    if (this.tui.terminal.rows < 6) return [truncateToWidth(this.editor ? "pi-view \xB7 enlarge terminal \xB7 Neovim active \u2014 finish with :q or :wq" : `pi-view \xB7 enlarge terminal \xB7 ${this.closeHint}`, width)];
     this.requestedImages.clear();
     this.width = Math.max(1, width);
     this.bodyHeight = Math.max(1, this.tui.terminal.rows - 5);
@@ -5811,7 +5819,7 @@ var PreviewViewer = class {
     }
     body.push(...Array(Math.max(0, this.bodyHeight - body.length)).fill(""));
     if (this.editor) return this.frame(title, body, this.message || ":w save \xB7 :wq/:q return \xB7 :q! discard \xB7 keys go to Neovim", width);
-    let status = this.remotePrompt ? "Fetch remote Markdown images? Requests may reveal your IP. y: allow \xB7 any other key: deny" : this.message || (this.imageMode() ? `+/-: zoom \xB7 arrows: pan${document?.kind === "pdf" ? " \xB7 wheel: pages" : ""} \xB7 0: fit \xB7 1: actual \xB7 b: back \xB7 Esc: close` : this.picker && !this.panel ? "\u2191\u2193: choose \xB7 Enter: open \xB7 Backspace: parent \xB7 /: filter \xB7 Esc: close" : `${this.editable() ? "e: edit \xB7 " : ""}\u2191\u2193 wheel: scroll \xB7 /: search \xB7 n/N: matches \xB7 s: source/text \xB7 i: image \xB7 ?: help \xB7 Esc: close`);
+    let status = this.remotePrompt ? "Fetch remote Markdown images? Requests may reveal your IP. y: allow \xB7 any other key: deny" : this.message || (this.imageMode() ? `+/-: zoom \xB7 arrows: pan${document?.kind === "pdf" ? " \xB7 wheel: pages" : ""} \xB7 0: fit \xB7 1: actual \xB7 b: back \xB7 ${this.closeHint}` : this.picker && !this.panel ? `\u2191\u2193: choose \xB7 Enter: open \xB7 Backspace: parent \xB7 /: filter \xB7 ${this.closeHint}` : `${this.editable() ? "e: edit \xB7 " : ""}\u2191\u2193 wheel: scroll \xB7 /: search \xB7 n/N: matches \xB7 s: source/text \xB7 i: image \xB7 ?: help \xB7 ${this.closeHint}`);
     if (this.inputMode) status = `${this.inputMode}: ${this.input.render(Math.max(1, width - this.inputMode.length - 2))[0] ?? ""}`;
     return this.frame(title, body, status, width);
   }
@@ -5823,11 +5831,13 @@ import { homedir as homedir3 } from "node:os";
 import { relative, sep as sep2 } from "node:path";
 import { Input as Input2, matchesKey as matchesKey2, truncateToWidth as truncateToWidth2 } from "@earendil-works/pi-tui";
 var QuickOpen = class {
-  constructor(tui, theme, cwd, recent, done) {
+  constructor(tui, theme, cwd, recent, done, restore) {
     this.tui = tui;
     this.theme = theme;
     this.cwd = cwd;
     this.done = done;
+    this.restorePath = restore?.path;
+    if (restore?.query) this.setValue(restore.query);
     this.input.onSubmit = () => {
       void this.choose();
     };
@@ -5858,6 +5868,12 @@ var QuickOpen = class {
   version = 0;
   _focused = false;
   detachMouse;
+  /** Path to highlight once it appears in the candidate list (consumed once). */
+  restorePath;
+  /** Current input text, so a host can restore it after a preview closes. */
+  get query() {
+    return this.input.getValue();
+  }
   get focused() {
     return this._focused;
   }
@@ -5898,6 +5914,11 @@ var QuickOpen = class {
       }
     });
     this.selected = value.length ? -1 : this.candidates.length ? 0 : -1;
+    const restored = this.restorePath === void 0 ? -1 : this.candidates.findIndex((item) => item.path === this.restorePath);
+    if (restored >= 0) {
+      this.restorePath = void 0;
+      this.selected = restored;
+    }
     this.version++;
     if (!this.closed) this.tui.requestRender();
   }
@@ -6217,14 +6238,15 @@ function piView(pi) {
     } catch {
     }
   };
-  async function showPreview(ctx, path3, initial) {
+  async function showPreview(ctx, path3, initial, fromPicker = false) {
     if (closePreview && !closePreview()) {
       ctx.ui.notify("Neovim session active \u2014 finish with :q or :wq (or :q! to discard), then try again", "warning");
-      return;
+      return false;
     }
     let viewer;
     let handle;
     let localClose;
+    let returned = false;
     try {
       await ctx.ui.custom((tui, theme, _keys, done) => {
         let ended = false;
@@ -6237,7 +6259,10 @@ function piView(pi) {
           closeOwned(tui, handle, done);
           return true;
         };
-        viewer = new PreviewViewer(tui, theme, localClose, path3, initial, recordOpen);
+        viewer = new PreviewViewer(tui, theme, (reason) => {
+          if (reason === "escape" && fromPicker) returned = true;
+          localClose?.(false);
+        }, path3, initial, recordOpen, fromPicker);
         closePreview = localClose;
         activeViewer = viewer;
         return viewer;
@@ -6253,14 +6278,15 @@ function piView(pi) {
       if (closePreview === localClose) closePreview = void 0;
       if (activeViewer === viewer) activeViewer = void 0;
     }
+    return returned;
   }
-  async function showQuick(ctx) {
-    if (quickPending || !ctx.hasUI) return;
+  async function pickFile(ctx, restore) {
+    if (quickPending || !ctx.hasUI) return void 0;
     quickPending = true;
-    const requested = lifetime;
     let quick;
     let handle;
     let picked;
+    let query = "";
     try {
       picked = await ctx.ui.custom((tui, theme, _keys, done) => {
         let ended = false;
@@ -6272,7 +6298,7 @@ function piView(pi) {
           closeOwned(tui, handle, () => done(path3));
         };
         closeQuick = () => finish();
-        quick = new QuickOpen(tui, theme, ctx.cwd, recentFiles(ctx.sessionManager.getBranch(), ctx.cwd), finish);
+        quick = new QuickOpen(tui, theme, ctx.cwd, recentFiles(ctx.sessionManager.getBranch(), ctx.cwd), finish, restore);
         return quick;
       }, {
         overlay: true,
@@ -6285,12 +6311,22 @@ function piView(pi) {
         }
       });
     } finally {
+      query = quick?.query ?? "";
       quick?.dispose();
       closeQuick = void 0;
       quickPending = false;
     }
-    if (picked && lifetime !== requested) picked = void 0;
-    if (picked) await showPreview(ctx, picked);
+    return picked ? { query, path: picked } : void 0;
+  }
+  async function showQuick(ctx) {
+    let state;
+    for (; ; ) {
+      const started = lifetime;
+      const chosen = await pickFile(ctx, state);
+      if (!chosen || lifetime !== started) return;
+      if (!await showPreview(ctx, chosen.path, void 0, true) || lifetime !== started) return;
+      state = chosen;
+    }
   }
   pi.on("session_start", (_event, ctx) => {
     lifetime++;

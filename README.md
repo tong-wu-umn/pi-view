@@ -108,13 +108,15 @@ Quick Open and command Tab completion match filename prefixes case-insensitively
 
 Previews reload when the file changes; press `r` to reload manually. Press `o` to browse the file's directory. In OMP, standalone Quick Open uses keyboard navigation; wheel input works when Quick Open is layered over a preview.
 
+A preview opened from Quick Open keeps the picker behind it: `Esc` returns to the file list with the same query and the file you came back from already selected, so you can look through several files in a row. `Ctrl+C` closes the preview and the picker together, and in the picker `Esc` clears the query first and closes it once the box is empty.
+
 ## Keyboard controls
 
 Press `?` in a preview for help. These controls apply to previews, not an active Neovim editor.
 
 | Action | Keys |
 | --- | --- |
-| Close | `Esc` / `Ctrl+C` |
+| Close, or return to Quick Open when the preview came from it | `Esc` / `Ctrl+C` |
 | Scroll text | Arrows, `j` / `k`, `PgUp` / `PgDn`, wheel |
 | Search text or filter a directory; next / previous match | `/`, then `n` / `N` for search matches |
 | Markdown source / PDF text view | `s` |
